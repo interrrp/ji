@@ -2,6 +2,7 @@
 name = "ji"
 version = "0.1.0"
 requires-python = ">=3.13"
+dependencies = ["scapy>=2.6.1"]
 
 [dependency-groups]
 dev = []
@@ -9,5 +10,5 @@ dev = []
 [tool.ruff]
 line-length = 100
 lint.select = ["ALL"]
-lint.ignore = ["D"]
+lint.ignore = ["D", "T201", "FBT003"]
 lint.per-file-ignores = { "tests/**/*.py" = ["S101"] }
