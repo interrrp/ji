@@ -161,6 +161,7 @@ class ClientHandler:
             self.writer.write(bytes(cast("Raw", pkt[Raw])))
             await self.writer.drain()
 
+        # Finish Configuration
         async with PacketWriter(0x03, self):
             pass
 
