@@ -1,6 +1,7 @@
 import asyncio
 import json
-from asyncio import IncompleteReadError, StreamReader, StreamWriter
+from asyncio import IncompleteReadError, StreamReader, StreamWriter, sleep
+from random import randint
 from typing import Literal, cast, final
 
 from scapy.all import Raw, rdpcap
@@ -31,6 +32,9 @@ class ClientHandler:
             "configuration",
             "play",
         ] = "handshaking"
+
+        self._keep_alive_payload = 0
+        asyncio.create_task(self._send_keepalives())
 
     async def start(self) -> None:
         while True:
@@ -80,6 +84,8 @@ class ClientHandler:
                 await self._set_player_position()
             case 0x1E if self._state == "play":
                 await self._set_player_position_and_rotation()
+            case 0x1B if self._state == "play":
+                await self._serverbound_keep_alive()
 
             case _:
                 print(f"Unhandled packet ID 0x{pkt_id:02X} ({self._state})")
@@ -214,6 +220,12 @@ class ClientHandler:
             p.float_(0)  # Pitch
             p.integer(0)  # Teleport flags
 
+        # Chunk Data and Update Light
+        cd_pkts = rdpcap("chunk_data_and_update_light.pcap")
+        for pkt in cd_pkts:
+            self._writer.write(bytes(cast("Raw", pkt[Raw])))
+            await self._writer.drain()
+
     async def _set_player_position(self) -> None:
         _x = await self._read.double()
         _y = await self._read.double()
@@ -227,6 +239,19 @@ class ClientHandler:
         _yaw = await self._read.float_()
         _pitch = await self._read.float_()
         _flags = await self._read.byte()
+
+    async def _serverbound_keep_alive(self) -> None:
+        payload = await self._read.long()
+        if payload != self._keep_alive_payload:
+            print(f"Client responded with wrong keep-alive payload {payload}")
+
+    async def _send_keepalives(self) -> None:
+        while True:
+            if self._state == "play":
+                self._keep_alive_payload = randint(0, 0x7FFFFFFFFFFFFFFF)  # noqa: S311
+                async with self._send_packet(0x26) as p:
+                    p.long(self._keep_alive_payload)
+            await sleep(1)
 
 
 async def handle_client(reader: StreamReader, writer: StreamWriter) -> None:

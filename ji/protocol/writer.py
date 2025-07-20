@@ -51,6 +51,9 @@ class PacketWriter:
     def unsigned_byte(self, val: int) -> None:
         self._buf += val.to_bytes(1, signed=False)
 
+    def short(self, val: int) -> None:
+        self._buf += val.to_bytes(2, signed=True)
+
     def float_(self, val: float) -> None:
         self._buf += struct.pack("f", val)
 
