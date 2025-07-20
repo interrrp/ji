@@ -53,7 +53,7 @@ class PacketReader:
         return int.from_bytes(await self._reader.readexactly(8), signed=True)
 
     async def float_(self) -> float:
-        return cast("float", struct.unpack(">f", await self._reader.readexactly(8))[0])
+        return cast("float", struct.unpack(">f", await self._reader.readexactly(4))[0])
 
     async def double(self) -> float:
         return cast("float", struct.unpack(">d", await self._reader.readexactly(8))[0])
