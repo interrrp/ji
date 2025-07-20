@@ -33,8 +33,8 @@ class ClientHandler:
             "play",
         ] = "handshaking"
 
-        self._keep_alive_payload = 0
-        asyncio.create_task(self._send_keepalives())
+        self._keepalive_payload = 0
+        self._keepalive_task = asyncio.create_task(self._send_keepalives())
 
     async def start(self) -> None:
         while True:
@@ -242,15 +242,15 @@ class ClientHandler:
 
     async def _serverbound_keep_alive(self) -> None:
         payload = await self._read.long()
-        if payload != self._keep_alive_payload:
+        if payload != self._keepalive_payload:
             print(f"Client responded with wrong keep-alive payload {payload}")
 
     async def _send_keepalives(self) -> None:
         while True:
             if self._state == "play":
-                self._keep_alive_payload = randint(0, 0x7FFFFFFFFFFFFFFF)  # noqa: S311
+                self._keepalive_payload = randint(0, 0x7FFFFFFFFFFFFFFF)  # noqa: S311
                 async with self._send_packet(0x26) as p:
-                    p.long(self._keep_alive_payload)
+                    p.long(self._keepalive_payload)
             await sleep(1)
 
 
