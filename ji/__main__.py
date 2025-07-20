@@ -1,14 +1,12 @@
 import asyncio
 import json
-import struct
 from asyncio import IncompleteReadError, StreamReader, StreamWriter
-from typing import Literal, Self, cast, final
-from uuid import UUID
+from typing import Literal, cast, final
 
 from scapy.all import Raw, rdpcap
 
-VARINT_SEGMENT_BITS = 0x7F
-VARINT_CONTINUE_BIT = 0x80
+from ji.protocol.reader import PacketReader
+from ji.protocol.writer import PacketWriter
 
 status_response = json.dumps(
     {
@@ -22,8 +20,9 @@ status_response = json.dumps(
 @final
 class ClientHandler:
     def __init__(self, reader: StreamReader, writer: StreamWriter) -> None:
-        self.reader = reader
-        self.writer = writer
+        self._read = PacketReader(reader)
+        self._send_packet = PacketWriter(writer)
+        self._writer = writer
 
         self._state: Literal[
             "handshaking",
@@ -42,10 +41,8 @@ class ClientHandler:
                 break
 
     async def _handle_packet(self) -> None:  # noqa: C901, PLR0912
-        pkt_len = await self._read_varint()
-        pkt_id = await self._read_varint()
-
-        print(f"{self._state} 0x{pkt_id:02X}")
+        pkt_len = await self._read.varint()
+        pkt_id = await self._read.varint()
 
         match pkt_id:
             case 0x00 if self._state == "handshaking":
@@ -70,6 +67,9 @@ class ClientHandler:
             case 0x03 if self._state == "configuration":
                 await self._acknowledge_finish_configuration()
 
+            case 0x00 if self._state == "play":
+                # Confirm Teleportation
+                pass
             case 0x0C if self._state == "play":
                 # Client Tick End
                 pass
@@ -78,16 +78,18 @@ class ClientHandler:
                 pass
             case 0x1D if self._state == "play":
                 await self._set_player_position()
+            case 0x1E if self._state == "play":
+                await self._set_player_position_and_rotation()
 
             case _:
-                print(f"Unhandled packet ID 0x{pkt_id:02X}")
-                _ = await self.reader.readexactly(pkt_len - 1)  # Read remaining bytes
+                print(f"Unhandled packet ID 0x{pkt_id:02X} ({self._state})")
+                _ = await self._read.bytes_(pkt_len - 1)  # Read remaining bytes
 
     async def _handshake(self) -> None:
-        _protocol_ver = await self._read_varint()
-        _server_address = await self._read_string()
-        _server_port = await self._read_unsigned_short()
-        intent = await self._read_varint()
+        _protocol_ver = await self._read.varint()
+        _server_address = await self._read.string()
+        _server_port = await self._read.unsigned_short()
+        intent = await self._read.varint()
 
         match intent:
             case 1:
@@ -98,21 +100,20 @@ class ClientHandler:
                 print(f"Unknown intent {intent}")
 
     async def _status_request(self) -> None:
-        async with PacketWriter(0x00, self) as p:
+        async with self._send_packet(0x00) as p:
             p.string(status_response)
 
     async def _status_ping_request(self) -> None:
-        payload = await self._read_long()
-        async with PacketWriter(0x01, self) as p:  # Ping Response
+        payload = await self._read.long()
+        async with self._send_packet(0x00) as p:
             p.long(payload)
-            self._state = "handshaking"
 
     async def _login_start(self) -> None:
-        username = await self._read_string()
-        uuid = await self._read_uuid()
+        username = await self._read.string()
+        uuid = await self._read.uuid()
 
         # Login Success
-        async with PacketWriter(0x02, self) as p:
+        async with self._send_packet(0x02) as p:
             p.uuid(uuid)
             p.string(username)
             p.varint(0)
@@ -121,36 +122,36 @@ class ClientHandler:
         self._state = "configuration"
 
         # Clientbound Known Packs
-        async with PacketWriter(0x0E, self) as p:
+        async with self._send_packet(0x0E) as p:
             p.varint(1)
             p.string("minecraft")
             p.string("core")
             p.string("1.21.8")
 
     async def _client_information(self) -> None:
-        _locale = await self._read_string()
-        _view_distance = await self._read_byte()
-        _chat_mode = await self._read_varint()
-        _chat_colors = await self._read_boolean()
-        _displayed_skin_parts = await self._read_unsigned_byte()
-        _main_hand = await self._read_varint()
-        _enable_text_filtering = await self._read_boolean()
-        _allow_server_listings = await self._read_boolean()
-        _particle_status = await self._read_varint()
+        _locale = await self._read.string()
+        _view_distance = await self._read.byte()
+        _chat_mode = await self._read.varint()
+        _chat_colors = await self._read.boolean()
+        _displayed_skin_parts = await self._read.unsigned_byte()
+        _main_hand = await self._read.varint()
+        _enable_text_filtering = await self._read.boolean()
+        _allow_server_listings = await self._read.boolean()
+        _particle_status = await self._read.varint()
 
     async def _serverbound_plugin_message(self) -> None:
-        _channel = await self._read_string()
-        _data = await self.reader.read(32767)
+        _channel = await self._read.string()
+        _data = await self._read.bytes_(32767)
 
     async def _serverbound_known_packs(self) -> None:
-        num_packs = await self._read_varint()
+        num_packs = await self._read.varint()
         for _ in range(num_packs):
-            _namespace = await self._read_string()
-            _pack_id = await self._read_string()
-            _version = await self._read_string()
+            _namespace = await self._read.string()
+            _pack_id = await self._read.string()
+            _version = await self._read.string()
 
         # Clientbound Plugin Message
-        async with PacketWriter(0x01, self) as p:
+        async with self._send_packet(0x01) as p:
             p.string("minecraft:brand")
             p.string("Ji")
 
@@ -158,19 +159,18 @@ class ClientHandler:
         # Way too complicated to send all of them so just replay captured ones
         registry_data_pkts = rdpcap("registry_data.pcap")
         for pkt in registry_data_pkts:
-            self.writer.write(bytes(cast("Raw", pkt[Raw])))
-            await self.writer.drain()
+            self._writer.write(bytes(cast("Raw", pkt[Raw])))
+            await self._writer.drain()
 
         # Finish Configuration
-        async with PacketWriter(0x03, self):
+        async with self._send_packet(0x03):
             pass
 
     async def _acknowledge_finish_configuration(self) -> None:
         self._state = "play"
-        print("x")
 
         # Login
-        async with PacketWriter(0x2B, self) as p:
+        async with self._send_packet(0x2B) as p:
             p.integer(1)  # Entity ID
             p.boolean(False)  # Hardcore
 
@@ -197,12 +197,12 @@ class ClientHandler:
             p.boolean(False)  # Enforces secure chat
 
         # Game Event (Start waiting for level chunks)
-        async with PacketWriter(0x22, self) as p:
+        async with self._send_packet(0x22) as p:
             p.unsigned_byte(13)
             p.float_(0)
 
         # Synchronize Player Position
-        async with PacketWriter(0x41, self) as p:
+        async with self._send_packet(0x41) as p:
             p.varint(42)  # Teleport ID
             p.double(0)  # X
             p.double(0)  # Y
@@ -215,111 +215,18 @@ class ClientHandler:
             p.integer(0)  # Teleport flags
 
     async def _set_player_position(self) -> None:
-        _x = await self._read_double()
-        _y = await self._read_double()
-        _z = await self._read_double()
-        _flags = await self._read_byte()
+        _x = await self._read.double()
+        _y = await self._read.double()
+        _z = await self._read.double()
+        _flags = await self._read.byte()
 
-    async def _read_varint(self) -> int:
-        val, pos, byte = 0, 0, 0
-
-        while True:
-            byte = (await self.reader.readexactly(1))[0]
-            val |= (byte & VARINT_SEGMENT_BITS) << pos
-
-            if (byte & VARINT_CONTINUE_BIT) == 0:
-                break
-
-            pos += 7
-
-            max_pos = 32
-            if pos >= max_pos:
-                msg = "VarInt is too big"
-                raise ValueError(msg)
-
-        return val
-
-    async def _read_boolean(self) -> bool:
-        return bool((await self.reader.readexactly(1))[0])
-
-    async def _read_string(self) -> str:
-        length = await self._read_varint()
-        return (await self.reader.readexactly(length)).decode()
-
-    async def _read_uuid(self) -> UUID:
-        return UUID(bytes=await self.reader.readexactly(16))
-
-    async def _read_byte(self) -> int:
-        return int.from_bytes(await self.reader.readexactly(1), signed=True)
-
-    async def _read_unsigned_byte(self) -> int:
-        return int.from_bytes(await self.reader.readexactly(1), signed=False)
-
-    async def _read_unsigned_short(self) -> int:
-        return int.from_bytes(await self.reader.readexactly(2), signed=False)
-
-    async def _read_long(self) -> int:
-        return int.from_bytes(await self.reader.readexactly(8), signed=True)
-
-    async def _read_double(self) -> float:
-        return cast("float", struct.unpack(">d", await self.reader.readexactly(8))[0])
-
-
-@final
-class PacketWriter:
-    def __init__(self, pkt_id: int, handler: ClientHandler) -> None:
-        self._pkt_id = pkt_id
-        self._writer = handler.writer
-        self._buf = b""
-
-    def _varint(self, val: int) -> bytes:
-        buf = b""
-
-        while True:
-            if (val & ~VARINT_SEGMENT_BITS) == 0:
-                return buf + bytes([val])
-
-            buf += bytes([(val & VARINT_SEGMENT_BITS) | VARINT_CONTINUE_BIT])
-
-            val &= 0xFFFFFFFF
-            val = (val >> 7) & (0xFFFFFFFF >> 7)
-
-    def varint(self, val: int) -> None:
-        self._buf += self._varint(val)
-
-    def string(self, val: str) -> None:
-        self.varint(len(val))
-        self._buf += val.encode()
-
-    def uuid(self, val: UUID) -> None:
-        self._buf += val.bytes
-
-    def long(self, val: int) -> None:
-        self._buf += val.to_bytes(8, signed=True)
-
-    def integer(self, val: int) -> None:
-        self._buf += val.to_bytes(4, signed=True)
-
-    def boolean(self, val: bool) -> None:  # noqa: FBT001
-        self._buf += bytes([val])
-
-    def unsigned_byte(self, val: int) -> None:
-        self._buf += val.to_bytes(1, signed=False)
-
-    def float_(self, val: float) -> None:
-        self._buf += struct.pack("f", val)
-
-    def double(self, val: float) -> None:
-        self._buf += struct.pack("d", val)
-
-    async def __aenter__(self) -> Self:
-        return self
-
-    async def __aexit__(self, *args: object, **kwargs: object) -> None:
-        self._writer.write(self._varint(len(self._buf) + 1))
-        self._writer.write(self._varint(self._pkt_id))
-        self._writer.write(self._buf)
-        await self._writer.drain()
+    async def _set_player_position_and_rotation(self) -> None:
+        _x = await self._read.double()
+        _y = await self._read.double()
+        _z = await self._read.double()
+        _yaw = await self._read.float_()
+        _pitch = await self._read.float_()
+        _flags = await self._read.byte()
 
 
 async def handle_client(reader: StreamReader, writer: StreamWriter) -> None:
